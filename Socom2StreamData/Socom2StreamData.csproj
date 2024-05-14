@@ -124,6 +124,7 @@
     <Compile Include="frm_Players_Team.Designer.cs">
       <DependentUpon>frm_Players_Team.cs</DependentUpon>
     </Compile>
+    <Compile Include="Helpers\Memory.cs" />
     <Compile Include="Helpers\ConversionHelper.cs" />
     <Compile Include="Helpers\GeneralFunctionsHelper.cs" />
     <Compile Include="Models\Collections.cs" />
