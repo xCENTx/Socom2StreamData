@@ -330,7 +330,6 @@ namespace Socom2StreamData.Helpers
         }
 
 
-        // Method to get the memory protection of a memory region in a target process
         public static MemoryProtectionFlags GetMemoryProtection(IntPtr processHandle, IntPtr address)
         {
             MEMORY_BASIC_INFORMATION memoryInfo;
