@@ -211,14 +211,14 @@ namespace Socom2StreamData.Helpers
 
         /// MEMBERS
 
-        public static bool bAttached;
-        public static Process Proc;
+        static bool bAttached;
+        static Process Proc;
+        static IntPtr ProcHandle;
+        static Encoding enc8 = Encoding.UTF8;
+        static Encoding encASC = Encoding.ASCII;
         public static int ProcID;
-        public static IntPtr ProcHandle;
         public static IntPtr ProcModBase;
         public static IntPtr EEmem;
-        public static Encoding enc8 = Encoding.UTF8;
-        public static Encoding encASC = Encoding.ASCII;
 
         /// METHODS
         
@@ -275,21 +275,21 @@ namespace Socom2StreamData.Helpers
             ExportDirectory exportDirectory;
 
             //  Read DOS header
-            dosHeader = ReadStruct<IMAGE_DOS_HEADER>(ProcHandle, ProcModBase);
+            dosHeader = ReadStruct<IMAGE_DOS_HEADER>(ProcModBase);
 
             //  Read PE header
-            ntHeader = ReadStruct<IMAGE_NT_HEADERS>(ProcHandle, ProcModBase + dosHeader.e_lfanew);
+            ntHeader = ReadStruct<IMAGE_NT_HEADERS>(ProcModBase + dosHeader.e_lfanew);
 
             //  Get the address of the export table
             IntPtr exportTableAddress = (IntPtr)(ProcModBase.ToInt64() + ntHeader.OptionalHeader.DataDirectory[2].VirtualAddress);
 
             //  Read the export table
-            exportDirectory = ReadStruct<ExportDirectory>(ProcHandle, exportTableAddress);
+            exportDirectory = ReadStruct<ExportDirectory>(exportTableAddress);
 
             //  Find EEMem
-            uint[] namesRvaArray = ReadArray<uint>(ProcHandle, (IntPtr)(ProcModBase.ToInt64() + exportDirectory.AddressOfNames), (int)exportDirectory.NumberOfNames);
-            uint[] functionsRvaArray = ReadArray<uint>(ProcHandle, (IntPtr)(ProcModBase.ToInt64() + exportDirectory.AddressOfFunctions), (int)exportDirectory.NumberOfFunctions);
-            ushort[] nameOrdinalsArray = ReadArray<ushort>(ProcHandle, (IntPtr)(ProcModBase.ToInt64() + exportDirectory.AddressOfNameOrdinals), (int)exportDirectory.NumberOfNames);
+            uint[] namesRvaArray = ReadArray<uint>((IntPtr)(ProcModBase.ToInt64() + exportDirectory.AddressOfNames), (int)exportDirectory.NumberOfNames);
+            uint[] functionsRvaArray = ReadArray<uint>((IntPtr)(ProcModBase.ToInt64() + exportDirectory.AddressOfFunctions), (int)exportDirectory.NumberOfFunctions);
+            ushort[] nameOrdinalsArray = ReadArray<ushort>((IntPtr)(ProcModBase.ToInt64() + exportDirectory.AddressOfNameOrdinals), (int)exportDirectory.NumberOfNames);
 
             //  Iterate names in names array
             uint rva;
@@ -329,11 +329,11 @@ namespace Socom2StreamData.Helpers
             bAttached = false;
         }
 
-
-        public static MemoryProtectionFlags GetMemoryProtection(IntPtr processHandle, IntPtr address)
+        //  obtains memory protection for the specified address
+        public static MemoryProtectionFlags GetMemoryProtection(IntPtr addr)
         {
             MEMORY_BASIC_INFORMATION memoryInfo;
-            if (VirtualQueryEx(processHandle, address, out memoryInfo, (uint)Marshal.SizeOf(typeof(MEMORY_BASIC_INFORMATION))) == IntPtr.Zero)
+            if (VirtualQueryEx(ProcHandle, addr, out memoryInfo, (uint)Marshal.SizeOf(typeof(MEMORY_BASIC_INFORMATION))) == IntPtr.Zero)
             {
                 // Failed to query memory information
                 throw new InvalidOperationException("Failed to query memory information.");
@@ -342,11 +342,13 @@ namespace Socom2StreamData.Helpers
             return memoryInfo.Protect == 0 ? 0 : (MemoryProtectionFlags)memoryInfo.Protect;
         }
 
-        public static bool ChangeMemoryProtection(IntPtr pHandle, IntPtr addr, IntPtr size, uint newProtection, out uint oldProtect)
+        //  modifies memory protection for the specified address
+        public static bool ChangeMemoryProtection(IntPtr addr, IntPtr size, uint newProtection, out uint oldProtect)
         {
-            return VirtualProtectEx(pHandle, addr, size, newProtection, out oldProtect);
+            return VirtualProtectEx(ProcHandle, addr, size, newProtection, out oldProtect);
         }
 
+        //  Reads bytes from the specified address in memory
         public static byte[] ReadBytes(IntPtr addr, int size)
         {
             IntPtr bytesRead;
@@ -356,20 +358,21 @@ namespace Socom2StreamData.Helpers
             return buffer;
         }
 
-        public static T[] ReadArray<T>(IntPtr processHandle, IntPtr address, int count) where T : struct
+        //  Reads an array of members at the specified address in memory
+        public static T[] ReadArray<T>(IntPtr addr, int size) where T : struct
         {
-            byte[] buffer = new byte[Marshal.SizeOf(typeof(T)) * count];
+            byte[] buffer = new byte[Marshal.SizeOf(typeof(T)) * size];
             IntPtr bytesRead;
-            ReadProcessMemory(processHandle, address, buffer, buffer.Length, out bytesRead);
+            ReadProcessMemory(ProcHandle, addr, buffer, buffer.Length, out bytesRead);
 
             if (bytesRead.ToInt32() != buffer.Length)
             {
-                throw new Exception($"Failed to read array from process memory at address {address}");
+                throw new Exception($"Failed to read array from process memory at address {addr}");
             }
 
-            T[] result = new T[count];
+            T[] result = new T[size];
             IntPtr ptr = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(T)));
-            for (int i = 0; i < count; i++)
+            for (int i = 0; i < size; i++)
             {
                 Marshal.Copy(buffer, i * Marshal.SizeOf(typeof(T)), ptr, Marshal.SizeOf(typeof(T))); 
                 result[i] = Marshal.PtrToStructure<T>(ptr);
@@ -378,7 +381,8 @@ namespace Socom2StreamData.Helpers
             return result;
         }
 
-        public static string ReadString(IntPtr address)
+        // Reads a null-terminated string from memory
+        public static string ReadString(IntPtr addr)
         {
             List<byte> bytes = new List<byte>();
             byte currentByte;
@@ -386,7 +390,7 @@ namespace Socom2StreamData.Helpers
 
             do
             {
-                byte[] buf = ReadBytes(address + bytesRead, 1);
+                byte[] buf = ReadBytes(addr + bytesRead, 1);
                 currentByte = buf[0];
                 if (currentByte != 0)
                 {
@@ -397,23 +401,55 @@ namespace Socom2StreamData.Helpers
             return Encoding.ASCII.GetString(bytes.ToArray());
         }
 
-        public static T ReadStruct<T>(IntPtr processHandle, IntPtr address) where T : struct
+        //  Reads memory at the specified address and transforms the result into the input structure
+        public static T ReadStruct<T>(IntPtr addr) where T : struct
         {
             int structSize = Marshal.SizeOf(typeof(T));
             byte[] buffer = new byte[structSize];
 
             IntPtr bytesRead;
-            bool res = ReadProcessMemory(processHandle, address, buffer, structSize, out bytesRead);
+            if (!ReadProcessMemory(ProcHandle, addr, buffer, structSize, out bytesRead))
+            {
+                throw new Exception("Failed to read process memory.");
+            }
 
             if (bytesRead.ToInt64() != structSize)
             {
-                throw new Exception($"Failed to read struct from process memory at address {address}");
+                throw new Exception($"Failed to read struct from process memory at address {addr}");
             }
 
             GCHandle handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
             try
             {
                 return (T)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(T));
+            }
+            finally
+            {
+                handle.Free();
+            }
+        }
+
+        //  Template read memory
+        public static T ReadMemory<T>(IntPtr addr) where T : struct
+        {
+            int size = Marshal.SizeOf<T>();
+            byte[] buffer = new byte[size];
+            IntPtr bytesRead;
+
+            if (!ReadProcessMemory(ProcHandle, addr, buffer, size, out bytesRead))
+            {
+                throw new Exception("Failed to read process memory.");
+            }
+
+            if (bytesRead.ToInt32() != size)
+            {
+                throw new Exception($"Failed to read {size} bytes from process memory. Only {bytesRead} bytes read.");
+            }
+
+            GCHandle handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+            try
+            {
+                return Marshal.PtrToStructure<T>(handle.AddrOfPinnedObject());
             }
             finally
             {
@@ -428,5 +464,35 @@ namespace Socom2StreamData.Helpers
 
             WriteProcessMemory(ProcHandle, addr, buffer, size, out bytesWritten);
         }
+
+        public static void WriteMemory<T>(IntPtr addr, T value) where T : struct
+        {
+            int size = Marshal.SizeOf<T>();
+            byte[] buffer = new byte[size];
+
+            IntPtr ptr = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.StructureToPtr(value, ptr, false);
+                Marshal.Copy(ptr, buffer, 0, size);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(ptr);
+            }
+
+            IntPtr bytesWritten;
+
+            if (!WriteProcessMemory(ProcHandle, addr, buffer, size, out bytesWritten))
+            {
+                throw new Exception("Failed to write process memory.");
+            }
+
+            if (bytesWritten.ToInt32() != size)
+            {
+                throw new Exception($"Failed to write {size} bytes to process memory. Only {bytesWritten} bytes written.");
+            }
+        }
+
     }
 }
